@@ -13,13 +13,88 @@ from scipy.optimize import curve_fit
 from functools import reduce
 import io
 
-# Try to import theseus_growth, provide helpful error if not installed
-try:
-    import theseus_growth
-    th = theseus_growth.theseus()
-except ImportError:
-    st.error("Please install theseus_growth: `pip install theseus_growth`")
-    st.stop()
+# =============================================================================
+# Custom implementations (replacing theseus_growth for cloud compatibility)
+# =============================================================================
+
+class TheseusGrowth:
+    """Custom implementation of theseus_growth functions for cloud deployment."""
+    
+    def create_profile(self, days, retention_values, profile_max=181):
+        """Create a retention profile dictionary."""
+        # Normalize retention values to 0-1 range if they're percentages
+        normalized = [v / 100 if v > 1 else v for v in retention_values]
+        
+        # Create profile dict mapping day to retention
+        profile = {}
+        for d, r in zip(days, normalized):
+            profile[d] = r
+        
+        # Interpolate for all days
+        full_profile = {}
+        for day in range(1, profile_max + 1):
+            if day in profile:
+                full_profile[day] = profile[day]
+            else:
+                # Linear interpolation between known points
+                lower_days = [d for d in days if d < day]
+                upper_days = [d for d in days if d > day]
+                
+                if not lower_days:
+                    full_profile[day] = profile[min(days)]
+                elif not upper_days:
+                    full_profile[day] = profile[max(days)]
+                else:
+                    lower_day = max(lower_days)
+                    upper_day = min(upper_days)
+                    lower_val = profile[lower_day]
+                    upper_val = profile[upper_day]
+                    # Linear interpolation
+                    ratio = (day - lower_day) / (upper_day - lower_day)
+                    full_profile[day] = lower_val + ratio * (upper_val - lower_val)
+        
+        return full_profile
+    
+    def project_cohorted_DAU(self, profile, periods, cohorts, start_date=1):
+        """Project DAU for cohorts based on retention profile."""
+        num_cohorts = len(cohorts)
+        
+        # Create DataFrame with cohorts as rows and days as columns
+        columns = [str(i) for i in range(1, periods + 1)]
+        dau_df = pd.DataFrame(0.0, index=range(num_cohorts), columns=columns)
+        
+        for cohort_idx, cohort_size in enumerate(cohorts):
+            cohort_start = start_date + cohort_idx
+            
+            for day in range(1, periods + 1):
+                days_since_install = day - cohort_start + 1
+                
+                if days_since_install >= 1 and days_since_install in profile:
+                    retention = profile[days_since_install]
+                    dau_df.iloc[cohort_idx, day - 1] = cohort_size * retention
+                elif days_since_install >= 1:
+                    # Use last known retention for days beyond profile
+                    max_profile_day = max(profile.keys())
+                    if days_since_install > max_profile_day:
+                        dau_df.iloc[cohort_idx, day - 1] = cohort_size * profile[max_profile_day]
+        
+        return dau_df
+    
+    def DAU_total(self, forward_DAU):
+        """Sum DAU across all cohorts."""
+        total = forward_DAU.sum(axis=0).to_frame().T
+        total.index = ['total']
+        return total
+    
+    def combine_DAU(self, DAU_totals, labels):
+        """Combine multiple DAU totals into one DataFrame."""
+        combined = pd.concat(DAU_totals, axis=0)
+        combined.index = labels
+        return combined
+
+
+# Initialize custom theseus instance
+th = TheseusGrowth()
 
 # =============================================================================
 # Configuration
@@ -261,14 +336,9 @@ def build_revenue_tables(variables, cpi_dict, channel_list):
 
 
 def safe_dau_total(dau_df):
-    """Safely compute DAU total, handling single-row case."""
-    if len(dau_df) < 2:
-        # For single row, just return the row as a DataFrame with 'total' index
-        total = dau_df.sum(axis=0).to_frame().T
-        total.index = ['total']
-        return total
-    else:
-        return th.DAU_total(dau_df)
+    """Safely compute DAU total, handling any number of rows."""
+    # Our custom th.DAU_total already handles all cases
+    return th.DAU_total(dau_df)
 
 
 def create_dau_chart(dau_tables, channel_list):
