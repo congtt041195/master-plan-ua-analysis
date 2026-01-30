@@ -1,7 +1,7 @@
 streamlit
-pandas==1.5.3
-numpy==1.26.4
+pandas<2.0.0
+numpy<2.0.0
 plotly
-scipy==1.13.1
+scipy
 openpyxl
 theseus_growth
