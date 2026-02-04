@@ -647,6 +647,20 @@ def main():
     - **Column G**: LTV values
     """)
     
+    # Template download button
+    import os
+    template_path = os.path.join(os.path.dirname(__file__), 'input_template.xlsx')
+    if os.path.exists(template_path):
+        with open(template_path, 'rb') as f:
+            template_data = f.read()
+        st.sidebar.download_button(
+            label="📥 Download Input Template",
+            data=template_data,
+            file_name="input_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download the template Excel file to fill in your data"
+        )
+    
     uploaded_file = st.sidebar.file_uploader(
         "Choose Excel file", 
         type=['xlsx', 'xls'],
@@ -719,46 +733,16 @@ def main():
         with st.spinner("Building revenue tables..."):
             ltv_tables, dau_tables = build_revenue_tables(variables, cpi_dict, channel_list)
         
-        # Create tabs for different views
+        # Create tabs for different views (ROAS & Profit first)
         tab1, tab2, tab3, tab4 = st.tabs([
+            "📊 ROAS & Profit",
             "📈 DAU Analysis", 
             "💰 Revenue Analysis", 
-            "📊 ROAS & Profit", 
             "📋 Channel Details"
         ])
         
-        # Tab 1: DAU Analysis
+        # Tab 1: ROAS & Profit (moved to first)
         with tab1:
-            st.header("Daily Active Users (DAU)")
-            fig_dau, combined_DAU = create_dau_chart(dau_tables, channel_list)
-            st.plotly_chart(fig_dau, use_container_width=True)
-            
-            # Download button
-            excel_data = to_excel_download(combined_DAU, 'DAU')
-            st.download_button(
-                label="📥 Download DAU Data",
-                data=excel_data,
-                file_name="DAU_analysis.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        # Tab 2: Revenue Analysis
-        with tab2:
-            st.header("Daily Revenue")
-            fig_rev, combined_revenue = create_revenue_chart(ltv_tables, channel_list)
-            st.plotly_chart(fig_rev, use_container_width=True)
-            
-            # Download button
-            excel_data = to_excel_download(combined_revenue, 'Revenue')
-            st.download_button(
-                label="📥 Download Revenue Data",
-                data=excel_data,
-                file_name="Revenue_analysis.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        # Tab 3: ROAS & Profit
-        with tab3:
             st.header("ROAS & Profit Analysis (D0-D360)")
             
             fig_profit, total_revenue, total_cost, break_even_day, revenue_d180 = create_profit_chart(
@@ -798,6 +782,36 @@ def main():
                     st.metric("⭐ Break Even Day", "Not reached (D360+)")
             
             st.plotly_chart(fig_profit, use_container_width=True)
+        
+        # Tab 2: DAU Analysis
+        with tab2:
+            st.header("Daily Active Users (DAU)")
+            fig_dau, combined_DAU = create_dau_chart(dau_tables, channel_list)
+            st.plotly_chart(fig_dau, use_container_width=True)
+            
+            # Download button
+            excel_data = to_excel_download(combined_DAU, 'DAU')
+            st.download_button(
+                label="📥 Download DAU Data",
+                data=excel_data,
+                file_name="DAU_analysis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        # Tab 3: Revenue Analysis
+        with tab3:
+            st.header("Daily Revenue")
+            fig_rev, combined_revenue = create_revenue_chart(ltv_tables, channel_list)
+            st.plotly_chart(fig_rev, use_container_width=True)
+            
+            # Download button
+            excel_data = to_excel_download(combined_revenue, 'Revenue')
+            st.download_button(
+                label="📥 Download Revenue Data",
+                data=excel_data,
+                file_name="Revenue_analysis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         
         # Tab 4: Channel Details
         with tab4:
