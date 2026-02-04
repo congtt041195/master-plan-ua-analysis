@@ -59,24 +59,27 @@ class TheseusGrowth:
         """Project DAU for cohorts based on retention profile."""
         num_cohorts = len(cohorts)
         
-        # Create DataFrame with cohorts as rows and days as columns
-        columns = [str(i) for i in range(1, periods + 1)]
+        # Create DataFrame with cohorts as rows and days as columns (including Day 0)
+        columns = [str(i) for i in range(0, periods + 1)]  # Start from 0
         dau_df = pd.DataFrame(0.0, index=range(num_cohorts), columns=columns)
         
         for cohort_idx, cohort_size in enumerate(cohorts):
             cohort_start = start_date + cohort_idx
             
-            for day in range(1, periods + 1):
+            for day in range(0, periods + 1):  # Start from 0
                 days_since_install = day - cohort_start + 1
                 
-                if days_since_install >= 1 and days_since_install in profile:
+                if days_since_install == 0:
+                    # Day 0 = install day = 100% of cohort
+                    dau_df.iloc[cohort_idx, day] = cohort_size
+                elif days_since_install >= 1 and days_since_install in profile:
                     retention = profile[days_since_install]
-                    dau_df.iloc[cohort_idx, day - 1] = cohort_size * retention
+                    dau_df.iloc[cohort_idx, day] = cohort_size * retention
                 elif days_since_install >= 1:
                     # Use last known retention for days beyond profile
                     max_profile_day = max(profile.keys())
                     if days_since_install > max_profile_day:
-                        dau_df.iloc[cohort_idx, day - 1] = cohort_size * profile[max_profile_day]
+                        dau_df.iloc[cohort_idx, day] = cohort_size * profile[max_profile_day]
         
         return dau_df
     
@@ -99,7 +102,7 @@ th = TheseusGrowth()
 # =============================================================================
 # Configuration
 # =============================================================================
-PROFILE_MAX_DAYS = 181
+PROFILE_MAX_DAYS = 361  # Extend to D360
 RETENTION_DAYS = [1, 3, 7, 14, 30, 60]
 
 # =============================================================================
@@ -142,18 +145,84 @@ def create_retention_profile(days_np, rr_values, profile_max=PROFILE_MAX_DAYS):
 
 
 def create_ltv_curve(days_np, ltv_values, ltv_d0, profile_max=PROFILE_MAX_DAYS):
-    """Fit logarithmic regression to LTV data and create full curve."""
-    params, _ = curve_fit(log_function, days_np[:len(ltv_values)], ltv_values)
-    a, b = params
+    """Fit power-law regression to LTV data (ROAS model approach).
     
+    Uses the formula: LTV = a × d^b
+    - Excludes D1 from fitting (uses D2+ only)
+    - Applies uncertainty discount for predictions beyond observed data
+    """
+    # Ensure arrays have the same length by pairing them
+    min_len = min(len(days_np), len(ltv_values))
+    days_arr = np.array(days_np[:min_len])
+    ltv_arr = np.array(ltv_values[:min_len])
+    
+    # Create paired filter: D2+ AND positive LTV values
+    valid_mask = (days_arr >= 2) & (ltv_arr > 0)
+    filtered_days = days_arr[valid_mask]
+    filtered_ltv = ltv_arr[valid_mask]
+    
+    # Fallback if not enough valid data points
+    if len(filtered_days) < 2:
+        # Use all days >= 1 with positive LTV
+        valid_mask = (days_arr >= 1) & (ltv_arr > 0)
+        filtered_days = days_arr[valid_mask]
+        filtered_ltv = ltv_arr[valid_mask]
+    
+    # Final safety check
+    if len(filtered_days) < 2:
+        # Not enough data - return simple curve
+        new_days = np.arange(1, profile_max)
+        predicted_values = np.full(len(new_days), ltv_d0)
+        result_df = pd.DataFrame({'day': new_days, 'ltv': predicted_values})
+        day_zero = pd.DataFrame({'day': [0], 'ltv': [ltv_d0]})
+        result_df = pd.concat([result_df, day_zero]).sort_values('day').reset_index(drop=True)
+        return result_df, 1.0, 0.0
+    
+    # Log transformation for linear regression
+    log_days = np.log(filtered_days)
+    log_ltv = np.log(filtered_ltv)
+    
+    # Linear regression in log space: ln(LTV) = ln(a) + b * ln(d)
+    n = len(log_days)
+    sum_x = np.sum(log_days)
+    sum_y = np.sum(log_ltv)
+    sum_x2 = np.sum(log_days ** 2)
+    sum_xy = np.sum(log_days * log_ltv)
+    
+    denominator = n * sum_x2 - sum_x ** 2
+    
+    if denominator == 0:
+        # Fallback for edge case
+        b = 0.5
+        a = np.mean(filtered_ltv)
+    else:
+        b = (n * sum_xy - sum_x * sum_y) / denominator
+        ln_a = (sum_y * sum_x2 - sum_x * sum_xy) / denominator
+        a = np.exp(ln_a)
+    
+    # Predict for all days
+    last_observed_day = int(filtered_days.max())
     new_days = np.arange(1, profile_max)
-    predicted_values = log_function(new_days, a, b)
+    predicted_values = a * np.power(new_days.astype(float), b)
+    
+    # Apply uncertainty discount for predictions beyond observed data
+    # Calibrated based on actual data:
+    # - D180: ~18% discount (119 predicted vs 98 actual)
+    # - D360: ~30% discount (168 predicted vs 118 actual)
+    days_beyond = np.maximum(new_days - last_observed_day, 0)
+    # Non-linear scaling with power 0.65 for better fit at both D180 and D360
+    discount = np.where(
+        days_beyond > 0,
+        0.02 + np.power(days_beyond / 300, 0.65) * 0.28,  # Scale from 2% to 30%
+        0.0
+    )
+    predicted_values = predicted_values * (1 - discount)
     
     result_df = pd.DataFrame({'day': new_days, 'ltv': predicted_values})
     day_zero = pd.DataFrame({'day': [0], 'ltv': [ltv_d0]})
     result_df = pd.concat([result_df, day_zero]).sort_values('day').reset_index(drop=True)
     
-    return result_df
+    return result_df, a, b  # Return coefficients for validation
 
 
 def load_data(uploaded_file):
@@ -222,8 +291,12 @@ def process_channels(cpi_dict, rr_dict, ltv_dict, channel_list):
         ltv_d0 = ltv_list[0]
         ltv_values = np.array(ltv_list[1:])  # Skip first value (day 0)
         
-        # Create LTV curve
-        result_df_ltv = create_ltv_curve(days_np, ltv_values, ltv_d0)
+        # Create LTV curve (power-law model)
+        result_df_ltv, ltv_a, ltv_b = create_ltv_curve(days_np, ltv_values, ltv_d0)
+        
+        # Validate LTV coefficients - flag unusual patterns
+        if ltv_a >= 1 or ltv_b >= 1 or ltv_a <= 0 or ltv_b <= 0:
+            st.warning(f"⚠️ {channel}: Unusual LTV growth pattern detected (a={ltv_a:.3f}, b={ltv_b:.3f})")
         
         # Merge RR and LTV data
         merge_df = result_df_ltv.merge(result_df_rr, on='day')
@@ -293,6 +366,11 @@ def build_revenue_tables(variables, cpi_dict, channel_list):
     for channel in channel_list:
         df_total = variables[f"{channel}_ltv"].copy()
         df_total.loc[:1, 'ltv_curve'] = 1
+        
+        # Add Day 0 with ltv_curve = 1 (100% for install day)
+        if 0 not in df_total.index:
+            day_zero_row = pd.DataFrame({'ltv_curve': [1.0]}, index=[0])
+            df_total = pd.concat([day_zero_row, df_total]).sort_index()
         
         df_total = df_total.T
         df_total.reset_index(drop=True, inplace=True)
@@ -453,6 +531,18 @@ def create_profit_chart(ltv_tables, variables, channel_list):
     df_rev['cumulative_profit'] = df_rev['cumulative_revenue'] - total_cost
     df_rev['day'] = df_rev['day'].astype(int)
     
+    # Calculate Revenue at D180
+    revenue_d180 = 0
+    d180_rows = df_rev[df_rev['day'] <= 180]
+    if len(d180_rows) > 0:
+        revenue_d180 = d180_rows['cumulative_revenue'].iloc[-1]
+    
+    # Calculate Break Even Day (first day where cumulative_profit >= 0)
+    break_even_day = None
+    profitable_days = df_rev[df_rev['cumulative_profit'] >= 0]
+    if len(profitable_days) > 0:
+        break_even_day = int(profitable_days['day'].iloc[0])
+    
     fig = go.Figure()
     
     # Cumulative revenue line
@@ -482,24 +572,47 @@ def create_profit_chart(ltv_tables, variables, channel_list):
         line=dict(color='red', dash='dash', width=2)
     ))
     
-    # Break-even line
+    # Break-even line (y=0)
     fig.add_trace(go.Scatter(
         x=[df_rev['day'].min(), df_rev['day'].max()],
         y=[0, 0],
         mode='lines',
-        name='Break-even',
+        name='Break-even Line',
         line=dict(color='gray', dash='dot')
     ))
     
+    # Add Break Even Day marker if found
+    if break_even_day is not None:
+        be_revenue = df_rev.loc[df_rev['day'] == break_even_day, 'cumulative_revenue'].values[0]
+        fig.add_trace(go.Scatter(
+            x=[break_even_day],
+            y=[be_revenue],
+            mode='markers+text',
+            name=f'Break Even (D{break_even_day})',
+            marker=dict(size=15, color='gold', symbol='star'),
+            text=[f'D{break_even_day}'],
+            textposition='top center',
+            textfont=dict(size=12, color='gold')
+        ))
+        
+        # Add vertical line at break even day
+        fig.add_vline(
+            x=break_even_day, 
+            line_dash="dash", 
+            line_color="gold",
+            annotation_text=f"Break Even: D{break_even_day}",
+            annotation_position="top"
+        )
+    
     fig.update_layout(
-        title='Cumulative Revenue and Profit Over Time',
+        title='Cumulative Revenue and Profit Over Time (D0-D360)',
         xaxis_title='Day',
         yaxis_title='Value ($)',
         height=500,
         legend=dict(yanchor='top', y=0.99, xanchor='left', x=0.01)
     )
     
-    return fig, total_revenue, total_cost
+    return fig, total_revenue, total_cost, break_even_day, revenue_d180
 
 
 def to_excel_download(df, sheet_name='Sheet1'):
@@ -646,26 +759,30 @@ def main():
         
         # Tab 3: ROAS & Profit
         with tab3:
-            st.header("ROAS & Profit Analysis")
+            st.header("ROAS & Profit Analysis (D0-D360)")
             
-            fig_profit, total_revenue, total_cost = create_profit_chart(
+            fig_profit, total_revenue, total_cost, break_even_day, revenue_d180 = create_profit_chart(
                 ltv_tables, variables, channel_list
             )
             
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
+            # Summary metrics - 6 columns now including ROAS D180 and Break Even Day
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
             
             with col1:
-                st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                st.metric("Total Revenue (D360)", f"${total_revenue:,.2f}")
             
             with col2:
                 st.metric("Total Cost", f"${total_cost:,.2f}")
             
             with col3:
-                roas = total_revenue / total_cost if total_cost > 0 else 0
-                st.metric("ROAS", f"{roas:.2%}")
+                roas_d180 = revenue_d180 / total_cost if total_cost > 0 else 0
+                st.metric("ROAS (D180)", f"{roas_d180:.2%}")
             
             with col4:
+                roas = total_revenue / total_cost if total_cost > 0 else 0
+                st.metric("ROAS (D360)", f"{roas:.2%}")
+            
+            with col5:
                 profit = total_revenue - total_cost
                 st.metric(
                     "Profit/Loss", 
@@ -673,6 +790,12 @@ def main():
                     delta=f"{profit:,.2f}",
                     delta_color="normal" if profit >= 0 else "inverse"
                 )
+            
+            with col6:
+                if break_even_day is not None:
+                    st.metric("⭐ Break Even Day", f"D{break_even_day}")
+                else:
+                    st.metric("⭐ Break Even Day", "Not reached (D360+)")
             
             st.plotly_chart(fig_profit, use_container_width=True)
         

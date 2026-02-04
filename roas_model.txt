@@ -1,0 +1,271 @@
+# ROAS Prediction Model Explanation
+
+## Overview
+
+This model predicts long-term ROAS (e.g., D360) from early cohort data using **Power-Law Curve Fitting**. The core assumption is that ROAS growth follows a power-law relationship over time.
+
+---
+
+## Mathematical Model
+
+### The Power-Law Function
+
+```
+ROAS(d) = a × d^b
+```
+
+Where:
+- `d` = day since install (1, 2, 3, ... 360)
+- `a` = scaling coefficient (represents approximate D1 ROAS)
+- `b` = growth exponent (controls how fast ROAS grows over time)
+- Typically: `0 < a < 1` and `0 < b < 1`
+
+### Why Power-Law?
+
+ROAS curves exhibit **diminishing returns** - early days contribute more revenue per day than later days. Power-law captures this naturally:
+
+```
+Day 1:   ROAS = a × 1^b = a
+Day 7:   ROAS = a × 7^b
+Day 30:  ROAS = a × 30^b
+Day 360: ROAS = a × 360^b
+```
+
+---
+
+## Fitting Process (Step-by-Step)
+
+### Step 1: Prepare Input Data
+
+You need ROAS values at specific days. Example:
+
+| Day (d) | Cumulative ROAS |
+|---------|-----------------|
+| 1       | 0.08            |
+| 2       | 0.12            |
+| 3       | 0.15            |
+| 7       | 0.22            |
+| 14      | 0.30            |
+
+**Important Notes from the script:**
+- Day 0 is excluded (used for spend only)
+- Day 1 is excluded from regression fitting (only D2+ used)
+- ROAS must be > 0
+
+### Step 2: Log Transformation
+
+Transform the power-law into a linear equation:
+
+```
+ROAS = a × d^b
+
+Take natural log of both sides:
+ln(ROAS) = ln(a) + b × ln(d)
+
+Let:
+  y = ln(ROAS)
+  x = ln(d)
+  α = ln(a)
+
+Linear form:
+  y = α + b × x
+```
+
+Example transformation:
+
+| d  | ROAS | x = ln(d) | y = ln(ROAS) |
+|----|------|-----------|--------------|
+| 2  | 0.12 | 0.693     | -2.120       |
+| 3  | 0.15 | 1.099     | -1.897       |
+| 7  | 0.22 | 1.946     | -1.514       |
+| 14 | 0.30 | 2.639     | -1.204       |
+
+### Step 3: Linear Regression (Least Squares)
+
+Calculate regression coefficients using these formulas:
+
+```
+n = number of data points
+
+sum_x      = Σ ln(d)
+sum_y      = Σ ln(ROAS)
+sum_x²     = Σ [ln(d)]²
+sum_xy     = Σ [ln(d) × ln(ROAS)]
+
+denominator = n × sum_x² - sum_x²
+
+b = (n × sum_xy - sum_x × sum_y) / denominator
+
+α = (sum_y × sum_x² - sum_x × sum_xy) / denominator
+
+a = exp(α)
+```
+
+### Step 4: Predict Future ROAS
+
+Once you have `a` and `b`:
+
+```
+ROAS_D30  = a × 30^b
+ROAS_D90  = a × 90^b
+ROAS_D180 = a × 180^b
+ROAS_D360 = a × 360^b
+```
+
+---
+
+## Complete Algorithm for LLM Implementation
+
+```
+ALGORITHM: Predict D360 ROAS from Early Cohort Data
+
+INPUT:
+  - roas_data: array of {day: int, roas: float}
+    Example: [{day: 1, roas: 0.08}, {day: 3, roas: 0.15}, {day: 7, roas: 0.22}, {day: 14, roas: 0.30}]
+  - target_day: int (e.g., 360)
+
+PROCESS:
+
+  1. FILTER data points:
+     - Keep only days >= 2 (exclude D0 and D1 from fitting)
+     - Keep only roas > 0
+     
+  2. TRANSFORM to log space:
+     For each data point:
+       log_x = ln(day)
+       log_y = ln(roas)
+     
+  3. CALCULATE regression statistics:
+     n = count of filtered data points
+     sum_log_x = sum of all log_x
+     sum_log_y = sum of all log_y
+     sum_log_x_squared = sum of (log_x × log_x)
+     sum_log_x_log_y = sum of (log_x × log_y)
+     
+  4. CALCULATE coefficients:
+     denominator = (n × sum_log_x_squared) - (sum_log_x × sum_log_x)
+     
+     IF denominator = 0:
+       RETURN error (insufficient variation in data)
+     
+     b = (n × sum_log_x_log_y - sum_log_x × sum_log_y) / denominator
+     
+     ln_a = (sum_log_y × sum_log_x_squared - sum_log_x × sum_log_x_log_y) / denominator
+     
+     a = exp(ln_a)
+     
+  5. VALIDATE coefficients:
+     IF a >= 1 OR b >= 1 OR a <= 0 OR b <= 0:
+       Flag as potentially invalid (unusual growth pattern)
+     
+  6. PREDICT target day ROAS:
+     predicted_roas = a × (target_day ^ b)
+
+OUTPUT:
+  - a: scaling coefficient
+  - b: growth exponent  
+  - predicted_roas: ROAS at target_day
+```
+
+---
+
+## Worked Example
+
+**Input Data:**
+```
+D1:  ROAS = 0.08
+D3:  ROAS = 0.15
+D7:  ROAS = 0.22
+D14: ROAS = 0.30
+```
+
+**Step 1: Filter (exclude D1)**
+```
+Use: D3, D7, D14
+```
+
+**Step 2: Log Transform**
+```
+D3:  x = ln(3) = 1.099,  y = ln(0.15) = -1.897
+D7:  x = ln(7) = 1.946,  y = ln(0.22) = -1.514
+D14: x = ln(14) = 2.639, y = ln(0.30) = -1.204
+```
+
+**Step 3: Calculate Statistics**
+```
+n = 3
+sum_log_x = 1.099 + 1.946 + 2.639 = 5.684
+sum_log_y = -1.897 + -1.514 + -1.204 = -4.615
+sum_log_x_squared = 1.099² + 1.946² + 2.639² = 1.208 + 3.787 + 6.964 = 11.959
+sum_log_x_log_y = (1.099 × -1.897) + (1.946 × -1.514) + (2.639 × -1.204)
+                = -2.085 + -2.946 + -3.177 = -8.208
+```
+
+**Step 4: Calculate Coefficients**
+```
+denominator = (3 × 11.959) - (5.684 × 5.684)
+            = 35.877 - 32.308 = 3.569
+
+b = (3 × -8.208 - 5.684 × -4.615) / 3.569
+  = (-24.624 + 26.230) / 3.569
+  = 1.606 / 3.569
+  = 0.450
+
+ln_a = (-4.615 × 11.959 - 5.684 × -8.208) / 3.569
+     = (-55.191 + 46.654) / 3.569
+     = -8.537 / 3.569
+     = -2.392
+
+a = exp(-2.392) = 0.091
+```
+
+**Step 5: Predict**
+```
+Model: ROAS(d) = 0.091 × d^0.450
+
+D30:  ROAS = 0.091 × 30^0.450  = 0.091 × 4.64  = 0.42
+D90:  ROAS = 0.091 × 90^0.450  = 0.091 × 7.55  = 0.69
+D180: ROAS = 0.091 × 180^0.450 = 0.091 × 10.20 = 0.93
+D360: ROAS = 0.091 × 360^0.450 = 0.091 × 13.77 = 1.25
+```
+
+---
+
+## Additional Refinements from the Original Script
+
+### 1. Uncertainty Discount for Future Predictions
+
+The script applies a discount for predictions beyond observed data:
+
+```
+days_beyond_observation = prediction_day - last_observed_day
+
+IF days_beyond_observation > 0:
+  discount = days_beyond_observation × 0.02 × 0.02 + 0.02
+  adjusted_roas = predicted_roas × (1 - discount)
+ELSE:
+  adjusted_roas = predicted_roas
+```
+
+### 2. Handling Recent Cohorts (< 5 days of data)
+
+For very fresh cohorts, the script:
+1. Uses **averaged `b` coefficient** from cohorts 5-11 days old
+2. Adjusts `a` using actual D1 ROAS: `a = ROAS_D1 / (1^b) = ROAS_D1`
+
+```
+IF cohort_age < 5 days:
+  b = average(b from cohorts aged 5-11 days with same dimensions)
+  a = actual_D1_ROAS (if available) OR average(a from same cohorts)
+```
+
+### 3. Validation Filters
+
+```
+- Exclude if a >= 1 (unrealistic scaling)
+- Exclude if b >= 1 (unrealistic growth rate)
+- Exclude if predicted_roas > 10 × max_observed_roas (outlier)
+- Exclude if cost_in_usd <= 10 (insufficient spend)
+```
+
+---
