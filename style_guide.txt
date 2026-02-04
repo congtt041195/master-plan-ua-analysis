@@ -1,0 +1,95 @@
+1. Global Streamlit Layout
+The current UI uses a sidebar for inputs and a wide main area. Keep that, but clean up the "Data Upload" section.
+
+Custom CSS: Inject a small bit of CSS to remove the default padding and style the metric cards to look more "Apple-like" and less "Bootstrap."
+
+The "Context" Header: Use st.title() for the big picture, but immediately follow it with an st.info() or a simple st.markdown() that explains the primary takeaway (e.g., "Performance is pacing 12% ahead of target").
+
+2. The Plotly "SWD" Theme
+By default, Plotly adds a lot of "ink." Use this configuration object in your code to declutter your charts:
+
+Python
+# Create a reusable template for your SWD style
+swd_template = {
+    "layout": {
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "font": {"family": "Inter, sans-serif", "color": "#4A5568"},
+        "xaxis": {"showgrid": False, "linecolor": "#E2E8F0"},
+        "yaxis": {"showgrid": True, "gridcolor": "#EDF2F7", "zeroline": False},
+        "margin": {"t": 40, "l": 0, "r": 20, "b": 40},
+        "hovermode": "closest",
+    }
+}
+3. Redesigning the "ROAS & Profit" Chart
+Instead of three competing colors, focus on the Gap between Revenue and Cost.
+
+The Baseline: Make the Total Cost line a solid, thin Medium Gray (#718096). It’s the benchmark, not the star.
+
+The Hero: Make the Cumulative Revenue line a Deep Blue (#2B6CB0) and slightly thicker.
+
+The Annotation: Use Plotly’s .add_annotation() to label the Break-Even point exactly where it happens. Don't make the user look at a legend; put the text "Break Even (D174)" right on the dot.
+
+4. Code Implementation (The "Vibe" Code)
+Here is how you would structure your Plotly figure in Python to match this aesthetic:
+
+Python
+import plotly.graph_objects as go
+import streamlit as st
+
+def create_ua_chart(df):
+    fig = go.Figure()
+
+    # 1. Background/Benchmark Line (Cost)
+    fig.add_trace(go.Scatter(
+        x=df['day'], y=df['total_cost'],
+        name="Total Cost",
+        line=dict(color='#A0AEC0', width=2, dash='dot'),
+        hovertemplate="Cost: $%{y:,.0f}<extra></extra>"
+    ))
+
+    # 2. Hero Line (Revenue)
+    fig.add_trace(go.Scatter(
+        x=df['day'], y=df['cum_revenue'],
+        name="Cumulative Revenue",
+        line=dict(color='#2B6CB0', width=4),
+        hovertemplate="Revenue: $%{y:,.0f}<extra></extra>"
+    ))
+
+    # 3. Direct Labeling (SWD Principle)
+    # Label the end of the lines instead of a legend
+    fig.add_annotation(
+        x=df['day'].iloc[-1], y=df['cum_revenue'].iloc[-1],
+        text="Revenue", xanchor="left", showarrow=False, xshift=10
+    )
+
+    # 4. Highlight the Break-Even Point
+    be_day = 174 # Calculate this dynamically
+    fig.add_trace(go.Scatter(
+        x=[be_day], y=[df.loc[df['day'] == be_day, 'cum_revenue'].values[0]],
+        mode='markers+text',
+        marker=dict(color='#E53E3E', size=10),
+        text=["Break Even"], textposition="top center"
+    ))
+
+    fig.update_layout(template=swd_template, showlegend=False)
+    return fig
+
+st.plotly_chart(create_ua_chart(data), use_container_width=True)
+5. Metric Cards with Delta Logic
+In your current UI, the metrics are a bit flat. Use Streamlit’s native st.metric but apply the "SWD" logic: only use color for the delta (change).
+
+Main Value: Black/Dark Gray.
+
+Delta: Red/Green based on whether it's beating the forecast.
+
+Context: Use st.caption below the metric to explain what the number means (e.g., "14% increase vs last cohort").
+
+6. Checklist for "Vibe" Success
+[ ] Delete the Legend: If you only have 2 lines, label them directly or use the chart title to explain the colors.
+
+[ ] Mute the Grid: Change gridcolor to a very light gray or hide it.
+
+[ ] No Borders: Ensure the st.container or card doesn't have a heavy black border. Use a 1px #E2E8F0 border or a soft shadow.
+
+[ ] Smart Rounding: Don't show $323,445.79 if $323k conveys the same story. SWD is about reducing "noise."

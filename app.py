@@ -116,6 +116,109 @@ st.set_page_config(
 )
 
 # =============================================================================
+# SWD Style Template (Storytelling with Data)
+# =============================================================================
+SWD_TEMPLATE = {
+    "layout": {
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "font": {"family": "Google Sans, sans-serif", "color": "#4A5568", "size": 12},
+        "xaxis": {"showgrid": False, "linecolor": "#E2E8F0", "tickfont": {"size": 11}},
+        "yaxis": {"showgrid": True, "gridcolor": "#EDF2F7", "zeroline": False, "tickfont": {"size": 11}},
+        "margin": {"t": 50, "l": 60, "r": 30, "b": 50},
+        "hovermode": "x unified",
+    }
+}
+
+# Color palette
+COLORS = {
+    'primary': '#2B6CB0',      # Deep Blue (Hero)
+    'secondary': '#718096',    # Medium Gray
+    'muted': '#A0AEC0',        # Light Gray
+    'success': '#38A169',      # Green
+    'danger': '#E53E3E',       # Red
+    'warning': '#D69E2E',      # Gold/Yellow
+    'accent': '#805AD5',       # Purple
+}
+
+# =============================================================================
+# Custom CSS for Apple-like UI
+# =============================================================================
+st.markdown("""
+<style>
+    /* Import Google Sans font */
+    @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600;700&display=swap');
+    
+    /* Apply Google Sans globally */
+    html, body, [class*="css"] {
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    /* Clean metric cards */
+    [data-testid="metric-container"] {
+        background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 16px 20px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    [data-testid="metric-container"] label {
+        color: #64748b !important;
+        font-size: 0.85rem !important;
+        font-weight: 500 !important;
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    [data-testid="metric-container"] [data-testid="stMetricValue"] {
+        color: #1e293b !important;
+        font-weight: 600 !important;
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    /* Cleaner sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+    }
+    
+    /* Remove default padding for charts */
+    .stPlotlyChart {
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        padding: 8px 16px;
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        color: #1e293b !important;
+        font-family: 'Google Sans', sans-serif !important;
+    }
+    
+    /* Info boxes */
+    .stAlert {
+        border-radius: 12px;
+        border: none;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        font-family: 'Google Sans', sans-serif !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# =============================================================================
 # Helper Functions
 # =============================================================================
 
@@ -419,8 +522,18 @@ def safe_dau_total(dau_df):
     return th.DAU_total(dau_df)
 
 
+def format_number(num):
+    """Smart number formatting - reduce noise."""
+    if abs(num) >= 1_000_000:
+        return f"${num/1_000_000:.1f}M"
+    elif abs(num) >= 1_000:
+        return f"${num/1_000:.1f}K"
+    else:
+        return f"${num:.0f}"
+
+
 def create_dau_chart(dau_tables, channel_list):
-    """Create DAU visualization."""
+    """Create DAU visualization with SWD styling."""
     if len(channel_list) > 1:
         # Get DAU totals for each channel
         dau_totals = []
@@ -434,43 +547,67 @@ def create_dau_chart(dau_tables, channel_list):
         combined_DAU_t = combined_DAU.transpose()
         
         fig = go.Figure()
-        for col in combined_DAU_t.columns:
-            fig.add_trace(go.Bar(
+        colors = [COLORS['primary'], COLORS['accent'], COLORS['success'], COLORS['warning']]
+        for i, col in enumerate(combined_DAU_t.columns):
+            fig.add_trace(go.Scatter(
                 x=pd.to_numeric(combined_DAU_t.index), 
-                y=combined_DAU_t[col], 
-                name=col
+                y=combined_DAU_t[col],
+                name=col,
+                fill='tonexty' if i > 0 else 'tozeroy',
+                mode='lines',
+                line=dict(width=0),
+                fillcolor=colors[i % len(colors)].replace(')', ', 0.6)').replace('rgb', 'rgba').replace('#', 'rgba(') if '#' in colors[i % len(colors)] else colors[i % len(colors)],
+                hovertemplate=f'{col}<br>Day %{{x}}<br>DAU: %{{y:,.0f}}<extra></extra>'
             ))
         
         fig.update_layout(
-            barmode='stack', 
-            title='Daily Active Users by Channel', 
+            **SWD_TEMPLATE['layout'],
+            title=dict(text='Daily Active Users', font=dict(size=16, color='#1e293b')),
             xaxis_title='Day', 
-            yaxis_title='DAU',
-            height=500
+            yaxis_title='',
+            height=450,
+            showlegend=True,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
         )
     else:
         channel_name = channel_list[0]
         combined_DAU = safe_dau_total(dau_tables[channel_name])
         
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=combined_DAU.columns, 
-            y=combined_DAU.iloc[0], 
-            name=channel_name
+        # Area chart instead of bar for cleaner look
+        fig.add_trace(go.Scatter(
+            x=pd.to_numeric(combined_DAU.columns), 
+            y=combined_DAU.iloc[0],
+            fill='tozeroy',
+            fillcolor='rgba(43, 108, 176, 0.3)',
+            line=dict(color=COLORS['primary'], width=2),
+            hovertemplate='Day %{x}<br>DAU: %{y:,.0f}<extra></extra>'
         ))
         
+        # Add end label
+        last_day = int(combined_DAU.columns[-1])
+        last_val = combined_DAU.iloc[0].iloc[-1]
+        fig.add_annotation(
+            x=last_day, y=last_val,
+            text=f"{last_val:,.0f}",
+            showarrow=False, xshift=25,
+            font=dict(color=COLORS['primary'], size=12, weight='bold')
+        )
+        
         fig.update_layout(
-            title='Daily Active Users',
+            **SWD_TEMPLATE['layout'],
+            title=dict(text='Daily Active Users', font=dict(size=16, color='#1e293b')),
             xaxis_title='Day',
-            yaxis_title='DAU',
-            height=500
+            yaxis_title='',
+            height=450,
+            showlegend=False
         )
     
     return fig, combined_DAU
 
 
 def create_revenue_chart(ltv_tables, channel_list):
-    """Create Revenue visualization."""
+    """Create Revenue visualization with SWD styling."""
     if len(channel_list) > 1:
         # Get revenue totals for each channel
         revenue_totals = []
@@ -484,36 +621,59 @@ def create_revenue_chart(ltv_tables, channel_list):
         combined_revenue_t = combined_revenue.transpose()
         
         fig = go.Figure()
-        for col in combined_revenue_t.columns:
-            fig.add_trace(go.Bar(
+        colors = [COLORS['success'], COLORS['accent'], COLORS['primary'], COLORS['warning']]
+        for i, col in enumerate(combined_revenue_t.columns):
+            fig.add_trace(go.Scatter(
                 x=pd.to_numeric(combined_revenue_t.index), 
-                y=combined_revenue_t[col], 
-                name=col
+                y=combined_revenue_t[col],
+                name=col,
+                fill='tonexty' if i > 0 else 'tozeroy',
+                mode='lines',
+                line=dict(width=0),
+                hovertemplate=f'{col}<br>Day %{{x}}<br>Revenue: $%{{y:,.0f}}<extra></extra>'
             ))
         
         fig.update_layout(
-            barmode='stack', 
-            title='Daily Revenue by Channel', 
+            **SWD_TEMPLATE['layout'],
+            title=dict(text='Daily Revenue by Channel', font=dict(size=16, color='#1e293b')),
             xaxis_title='Day', 
-            yaxis_title='Revenue ($)',
-            height=500
+            yaxis_title='',
+            height=450,
+            showlegend=True,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
         )
     else:
         channel_name = channel_list[0]
         combined_revenue = safe_dau_total(ltv_tables[channel_name])
         
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=combined_revenue.columns, 
-            y=combined_revenue.iloc[0], 
-            name=channel_name
+        # Area chart for cleaner look
+        fig.add_trace(go.Scatter(
+            x=pd.to_numeric(combined_revenue.columns), 
+            y=combined_revenue.iloc[0],
+            fill='tozeroy',
+            fillcolor='rgba(56, 161, 105, 0.3)',
+            line=dict(color=COLORS['success'], width=2),
+            hovertemplate='Day %{x}<br>Revenue: $%{y:,.0f}<extra></extra>'
         ))
         
+        # Add end label
+        last_day = int(combined_revenue.columns[-1])
+        last_val = combined_revenue.iloc[0].iloc[-1]
+        fig.add_annotation(
+            x=last_day, y=last_val,
+            text=f"${last_val:,.0f}",
+            showarrow=False, xshift=30,
+            font=dict(color=COLORS['success'], size=12, weight='bold')
+        )
+        
         fig.update_layout(
-            title='Daily Revenue',
+            **SWD_TEMPLATE['layout'],
+            title=dict(text='Daily Revenue', font=dict(size=16, color='#1e293b')),
             xaxis_title='Day',
-            yaxis_title='Revenue ($)',
-            height=500
+            yaxis_title='',
+            height=450,
+            showlegend=False
         )
     
     return fig, combined_revenue
@@ -545,71 +705,101 @@ def create_profit_chart(ltv_tables, variables, channel_list):
     
     fig = go.Figure()
     
-    # Cumulative revenue line
-    fig.add_trace(go.Scatter(
-        x=df_rev['day'], 
-        y=df_rev['cumulative_revenue'], 
-        mode='lines', 
-        name='Cumulative Revenue',
-        line=dict(color='green', width=2)
-    ))
-    
-    # Cumulative profit line
-    fig.add_trace(go.Scatter(
-        x=df_rev['day'], 
-        y=df_rev['cumulative_profit'], 
-        mode='lines', 
-        name='Cumulative Profit',
-        line=dict(color='blue', width=2)
-    ))
-    
-    # Cost reference line
+    # 1. Cost baseline - muted, thin, dotted (the benchmark)
     fig.add_trace(go.Scatter(
         x=[df_rev['day'].min(), df_rev['day'].max()],
         y=[total_cost, total_cost],
         mode='lines',
         name='Total Cost',
-        line=dict(color='red', dash='dash', width=2)
+        line=dict(color=COLORS['muted'], width=2, dash='dot'),
+        hovertemplate="Cost: $%{y:,.0f}<extra></extra>"
     ))
     
-    # Break-even line (y=0)
+    # 2. Hero line - Cumulative Revenue (thick, prominent)
     fig.add_trace(go.Scatter(
-        x=[df_rev['day'].min(), df_rev['day'].max()],
-        y=[0, 0],
-        mode='lines',
-        name='Break-even Line',
-        line=dict(color='gray', dash='dot')
+        x=df_rev['day'], 
+        y=df_rev['cumulative_revenue'], 
+        mode='lines', 
+        name='Revenue',
+        line=dict(color=COLORS['primary'], width=4),
+        fill='tozeroy',
+        fillcolor='rgba(43, 108, 176, 0.1)',
+        hovertemplate="Day %{x}<br>Revenue: $%{y:,.0f}<extra></extra>"
     ))
     
-    # Add Break Even Day marker if found
+    # 3. Direct labeling - end of lines (SWD principle: no legend needed)
+    last_day = df_rev['day'].iloc[-1]
+    last_revenue = df_rev['cumulative_revenue'].iloc[-1]
+    
+    fig.add_annotation(
+        x=last_day, y=last_revenue,
+        text=f"Revenue<br>${last_revenue:,.0f}",
+        xanchor="left", showarrow=False, xshift=10,
+        font=dict(color=COLORS['primary'], size=12, weight='bold'),
+        align='left'
+    )
+    
+    fig.add_annotation(
+        x=last_day, y=total_cost,
+        text=f"Cost<br>${total_cost:,.0f}",
+        xanchor="left", showarrow=False, xshift=10,
+        font=dict(color=COLORS['secondary'], size=11),
+        align='left'
+    )
+    
+    # 4. Break-even point - the key insight
     if break_even_day is not None:
         be_revenue = df_rev.loc[df_rev['day'] == break_even_day, 'cumulative_revenue'].values[0]
+        
+        # Marker at break-even
         fig.add_trace(go.Scatter(
             x=[break_even_day],
             y=[be_revenue],
-            mode='markers+text',
-            name=f'Break Even (D{break_even_day})',
-            marker=dict(size=15, color='gold', symbol='star'),
-            text=[f'D{break_even_day}'],
-            textposition='top center',
-            textfont=dict(size=12, color='gold')
+            mode='markers',
+            marker=dict(color=COLORS['danger'], size=12, symbol='circle'),
+            hovertemplate=f"Break Even<br>Day {break_even_day}<br>Revenue: ${be_revenue:,.0f}<extra></extra>",
+            showlegend=False
         ))
         
-        # Add vertical line at break even day
-        fig.add_vline(
-            x=break_even_day, 
-            line_dash="dash", 
-            line_color="gold",
-            annotation_text=f"Break Even: D{break_even_day}",
-            annotation_position="top"
+        # Direct annotation on the point
+        fig.add_annotation(
+            x=break_even_day, y=be_revenue,
+            text=f"Break Even<br>D{break_even_day}",
+            showarrow=True,
+            arrowhead=0,
+            arrowcolor=COLORS['danger'],
+            ax=0, ay=-50,
+            font=dict(color=COLORS['danger'], size=12, weight='bold'),
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor=COLORS['danger'],
+            borderwidth=1,
+            borderpad=4
         )
     
+    # SWD Layout - clean, no legend (direct labeling instead)
     fig.update_layout(
-        title='Cumulative Revenue and Profit Over Time (D0-D360)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Google Sans, sans-serif', color='#4A5568', size=12),
+        title=dict(
+            text='Revenue vs Cost Over Time',
+            font=dict(size=16, color='#1e293b')
+        ),
         xaxis_title='Day',
-        yaxis_title='Value ($)',
-        height=500,
-        legend=dict(yanchor='top', y=0.99, xanchor='left', x=0.01)
+        yaxis_title='',
+        height=480,
+        showlegend=False,  # No legend - use direct labeling
+        margin=dict(t=50, l=60, r=100, b=80),  # Extra right margin for labels
+        hovermode='x unified',
+        xaxis=dict(
+            showgrid=False,
+            linecolor='#E2E8F0',
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='#EDF2F7',
+            zeroline=False
+        )
     )
     
     return fig, total_revenue, total_cost, break_even_day, revenue_d180
@@ -743,43 +933,62 @@ def main():
         
         # Tab 1: ROAS & Profit (moved to first)
         with tab1:
-            st.header("ROAS & Profit Analysis (D0-D360)")
-            
             fig_profit, total_revenue, total_cost, break_even_day, revenue_d180 = create_profit_chart(
                 ltv_tables, variables, channel_list
             )
             
-            # Summary metrics - 6 columns now including ROAS D180 and Break Even Day
+            # Calculate key metrics
+            roas_d180 = revenue_d180 / total_cost if total_cost > 0 else 0
+            roas_d360 = total_revenue / total_cost if total_cost > 0 else 0
+            profit = total_revenue - total_cost
+            
+            # Context insight box - the primary takeaway (SWD principle)
+            if profit >= 0:
+                if break_even_day:
+                    insight_text = f"✅ **Campaign is profitable** — Break even reached at **D{break_even_day}** with **{roas_d360:.0%} ROAS** by D360"
+                else:
+                    insight_text = f"✅ **Campaign is profitable** — **{roas_d360:.0%} ROAS** by D360"
+                st.success(insight_text)
+            else:
+                loss_pct = abs(profit) / total_cost * 100 if total_cost > 0 else 0
+                insight_text = f"⚠️ **Campaign needs attention** — Currently **{loss_pct:.0f}% below break-even** at D360"
+                st.warning(insight_text)
+            
+            # Summary metrics - clean layout
             col1, col2, col3, col4, col5, col6 = st.columns(6)
             
             with col1:
-                st.metric("Total Revenue (D360)", f"${total_revenue:,.2f}")
+                st.metric("Revenue (D360)", f"${total_revenue:,.0f}")
+                st.caption("Predicted total")
             
             with col2:
-                st.metric("Total Cost", f"${total_cost:,.2f}")
+                st.metric("Total Cost", f"${total_cost:,.0f}")
+                st.caption("Ad spend")
             
             with col3:
-                roas_d180 = revenue_d180 / total_cost if total_cost > 0 else 0
-                st.metric("ROAS (D180)", f"{roas_d180:.2%}")
+                st.metric("ROAS (D180)", f"{roas_d180:.0%}")
+                st.caption("6-month return")
             
             with col4:
-                roas = total_revenue / total_cost if total_cost > 0 else 0
-                st.metric("ROAS (D360)", f"{roas:.2%}")
+                st.metric("ROAS (D360)", f"{roas_d360:.0%}")
+                st.caption("12-month return")
             
             with col5:
-                profit = total_revenue - total_cost
                 st.metric(
                     "Profit/Loss", 
-                    f"${profit:,.2f}",
-                    delta=f"{profit:,.2f}",
+                    f"${profit:,.0f}",
+                    delta=f"{'+'if profit >= 0 else ''}{profit/total_cost*100:.0f}%" if total_cost > 0 else "N/A",
                     delta_color="normal" if profit >= 0 else "inverse"
                 )
+                st.caption("Net result")
             
             with col6:
                 if break_even_day is not None:
-                    st.metric("⭐ Break Even Day", f"D{break_even_day}")
+                    st.metric("Break Even", f"D{break_even_day}")
+                    st.caption("Payback period")
                 else:
-                    st.metric("⭐ Break Even Day", "Not reached (D360+)")
+                    st.metric("Break Even", "D360+")
+                    st.caption("Not reached")
             
             st.plotly_chart(fig_profit, use_container_width=True)
         
@@ -845,27 +1054,36 @@ def main():
                 hide_index=True
             )
             
-            # Channel comparison chart
+            # Channel comparison chart - SWD style
             fig_comparison = go.Figure()
             
             fig_comparison.add_trace(go.Bar(
                 name='Revenue',
                 x=summary_df['Channel'],
                 y=summary_df['Revenue'],
-                marker_color='green'
+                marker_color=COLORS['primary'],
+                text=[f"${v:,.0f}" for v in summary_df['Revenue']],
+                textposition='outside',
+                hovertemplate='%{x}<br>Revenue: $%{y:,.0f}<extra></extra>'
             ))
             
             fig_comparison.add_trace(go.Bar(
                 name='Cost',
                 x=summary_df['Channel'],
                 y=summary_df['Cost'],
-                marker_color='red'
+                marker_color=COLORS['muted'],
+                text=[f"${v:,.0f}" for v in summary_df['Cost']],
+                textposition='outside',
+                hovertemplate='%{x}<br>Cost: $%{y:,.0f}<extra></extra>'
             ))
             
             fig_comparison.update_layout(
-                title='Revenue vs Cost by Channel',
+                **SWD_TEMPLATE['layout'],
+                title=dict(text='Revenue vs Cost by Channel', font=dict(size=16, color='#1e293b')),
                 barmode='group',
-                height=400
+                height=400,
+                showlegend=True,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
             )
             
             st.plotly_chart(fig_comparison, use_container_width=True)
