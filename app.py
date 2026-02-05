@@ -972,13 +972,45 @@ def build_direct_roas_revenue(direct_calc_info, channel_name='channel'):
         total_daily_revenue += daily_revenue
         total_cumulative_roas += predicted_roas * cohort_spend
         
-        # Store cohort summary (for combo chart)
+        # Break even day: first day where cumulative ROAS >= 1
+        break_even_day = None
+        for d in range(len(predicted_roas)):
+            if predicted_roas[d] >= 1.0:
+                break_even_day = d
+                break
+        if break_even_day is None:
+            break_even_day = 360  # D360+ if never breaks even
+
+        roas_d0 = predicted_roas[0] if len(predicted_roas) > 0 else 0
+        def _roas(d):
+            if len(predicted_roas) > d:
+                return predicted_roas[d]
+            return predicted_roas[-1] if len(predicted_roas) else 0
+
+        def _growth(d):
+            if roas_d0 and roas_d0 > 0:
+                return _roas(d) / roas_d0
+            return None
+
+        # Store cohort summary (for combo chart and detail table)
         cohort_summary.append({
             'date': cohort_date,
             'spend': cohort_spend,
             'installs': cohort.get('installs', 0),
+            'pROAS_D0': roas_d0,
+            'pROAS_D28': _roas(28),
+            'pROAS_D30': _roas(30),
+            'pROAS_D60': _roas(60),
+            'pROAS_D120': _roas(120),
             'pROAS_D180': predicted_roas[180] if len(predicted_roas) > 180 else 0,
-            'pROAS_D360': predicted_roas[360] if len(predicted_roas) > 360 else predicted_roas[-1]
+            'pROAS_D360': predicted_roas[360] if len(predicted_roas) > 360 else predicted_roas[-1],
+            'break_even_day': break_even_day,
+            'growth_rate_D28': _growth(28),
+            'growth_rate_D30': _growth(30),
+            'growth_rate_D60': _growth(60),
+            'growth_rate_D120': _growth(120),
+            'growth_rate_D180': _growth(180),
+            'growth_rate_D360': _growth(360),
         })
     
     # Normalize cumulative ROAS by total spend
@@ -1260,6 +1292,54 @@ def create_cohort_combo_chart(variables, channel_list):
     fig.update_yaxes(title_text='pROAS', tickformat='.0%', secondary_y=True, showgrid=False)
     
     return fig
+
+
+@st.fragment
+def _render_cohort_table_fragment(display_df, base_cols):
+    """Render optional growth-rate checkboxes and cohort table. Runs as fragment so ticking/Apply does not rerun whole app."""
+    growth_days = [28, 30, 60, 120, 180, 360]
+    if "cohort_growth_applied" not in st.session_state:
+        st.session_state["cohort_growth_applied"] = []
+    # SWD: context first, then controls
+    st.markdown('<span style="color: #4A5568; font-size: 0.95rem;">**Optional metrics**</span>', unsafe_allow_html=True)
+    st.caption("Tick the growth rates to include, then click Apply to refresh the table.")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.checkbox("Growth Rate D28", value=28 in st.session_state["cohort_growth_applied"], key="cohort_gr_28")
+    with c2:
+        st.checkbox("Growth Rate D30", value=30 in st.session_state["cohort_growth_applied"], key="cohort_gr_30")
+    with c3:
+        st.checkbox("Growth Rate D60", value=60 in st.session_state["cohort_growth_applied"], key="cohort_gr_60")
+    with c4:
+        st.checkbox("Growth Rate D120", value=120 in st.session_state["cohort_growth_applied"], key="cohort_gr_120")
+    with c5:
+        st.checkbox("Growth Rate D180", value=180 in st.session_state["cohort_growth_applied"], key="cohort_gr_180")
+    with c6:
+        st.checkbox("Growth Rate D360", value=360 in st.session_state["cohort_growth_applied"], key="cohort_gr_360")
+    if st.button("Apply", key="cohort_apply_growth"):
+        selected = [d for d in growth_days if st.session_state.get(f"cohort_gr_{d}", False)]
+        st.session_state["cohort_growth_applied"] = selected
+    selected_days = st.session_state["cohort_growth_applied"]
+    chosen = [f"growth_rate_D{d}" for d in selected_days if f"growth_rate_D{d}" in display_df.columns]
+    df = display_df.copy()
+    if chosen:
+        def _fmt_growth(x):
+            if x is None or (isinstance(x, float) and np.isnan(x)):
+                return "—"
+            return f"{x:.2f}x"
+        for c in chosen:
+            df[c] = df[c].apply(_fmt_growth)
+        table_df = df[base_cols + chosen].copy()
+        col_names = ['Date', 'Spend', 'Installs', 'pROAS D180', 'pROAS D360', 'Break Even day'] if 'break_even_day' in base_cols else ['Date', 'Spend', 'Installs', 'pROAS D180', 'pROAS D360']
+        col_names += [f"Growth Rate D{d}" for d in selected_days if f"growth_rate_D{d}" in display_df.columns]
+        table_df.columns = col_names
+    else:
+        table_df = df[base_cols].copy()
+        col_names = ['Date', 'Spend', 'Installs', 'pROAS D180', 'pROAS D360']
+        if 'break_even_day' in base_cols:
+            col_names.append('Break Even day')
+        table_df.columns = col_names
+    st.dataframe(table_df, use_container_width=True, height=400)
 
 
 def create_profit_chart(ltv_tables, variables, channel_list):
@@ -1677,15 +1757,21 @@ def main():
                         cohort_df = pd.DataFrame(variables[key])
                         cohort_df = cohort_df.sort_values('date').reset_index(drop=True)
                         
-                        # Format for display
+                        # Format for display: base columns
                         display_df = cohort_df.copy()
                         display_df['spend'] = display_df['spend'].apply(lambda x: f"${x:,.0f}")
                         display_df['pROAS_D180'] = display_df['pROAS_D180'].apply(lambda x: f"{x:.1%}")
                         display_df['pROAS_D360'] = display_df['pROAS_D360'].apply(lambda x: f"{x:.1%}")
-                        display_df.columns = ['Date', 'Spend', 'Installs', 'pROAS D180', 'pROAS D360']
+                        if 'break_even_day' in display_df.columns:
+                            display_df['break_even_day'] = display_df['break_even_day'].apply(
+                                lambda x: f"D{x}" if x < 360 else "D360+"
+                            )
+                            base_cols = ['date', 'spend', 'installs', 'pROAS_D180', 'pROAS_D360', 'break_even_day']
+                        else:
+                            base_cols = ['date', 'spend', 'installs', 'pROAS_D180', 'pROAS_D360']
                         
-                        with st.expander("📋 Cohort Details Table", expanded=False):
-                            st.dataframe(display_df, use_container_width=True, height=400)
+                        with st.expander("📋 Cohort Details Table", expanded=True):
+                            _render_cohort_table_fragment(display_df, base_cols)
                         
                         # Download button
                         excel_data = to_excel_download(cohort_df, 'Cohort_Summary')
