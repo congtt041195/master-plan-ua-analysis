@@ -124,7 +124,7 @@ SWD_TEMPLATE = {
         "paper_bgcolor": "rgba(0,0,0,0)",
         "font": {"family": "Google Sans, sans-serif", "color": "#4A5568", "size": 12},
         "xaxis": {"showgrid": False, "linecolor": "#E2E8F0", "tickfont": {"size": 11}},
-        "yaxis": {"showgrid": True, "gridcolor": "#EDF2F7", "zeroline": False, "tickfont": {"size": 11}},
+        "yaxis": {"showgrid": False, "zeroline": False, "tickfont": {"size": 11}},
         "margin": {"t": 50, "l": 60, "r": 30, "b": 50},
         "hovermode": "x unified",
     }
@@ -140,6 +140,14 @@ COLORS = {
     'warning': '#D69E2E',      # Gold/Yellow
     'accent': '#805AD5',       # Purple
 }
+
+def hex_to_rgba(hex_color, alpha=1.0):
+    """Convert hex color to rgba string."""
+    hex_color = hex_color.lstrip('#')
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return f'rgba({r}, {g}, {b}, {alpha})'
 
 # =============================================================================
 # Custom CSS for Apple-like UI
@@ -326,6 +334,303 @@ def create_ltv_curve(days_np, ltv_values, ltv_d0, profile_max=PROFILE_MAX_DAYS):
     result_df = pd.concat([result_df, day_zero]).sort_values('day').reset_index(drop=True)
     
     return result_df, a, b  # Return coefficients for validation
+
+
+# =============================================================================
+# Smart Column Mapping for Auto-Detection
+# =============================================================================
+
+import re
+
+# Column patterns for auto-detection (regex patterns)
+COLUMN_PATTERNS = {
+    'date': [r'^date$', r'^day$', r'^cohort', r'^install.?date'],
+    'spend': [r'^spend$', r'^cost$', r'^network.?cost$', r'^ad.?spend$'],
+    'installs': [r'^installs?$', r'^install.?count$'],
+    'cpi': [r'^cpi$', r'^cost.?per.?install$', r'^ecpi'],
+    # ROAS patterns - capture the day number (D0, D1, D7, etc.)
+    # Note: roas_d{N} only, NOT roas_ad_d{N}
+    'roas': [r'd(\d+).*total.*roas', r'^roas_d(\d+)$', r'^d(\d+)\s+total\s+roas$'],
+    # Retention patterns - capture the day number  
+    'retention': [r'd(\d+).*retention', r'retention.*d(\d+)', r'^retention_rate_d(\d+)$'],
+    # LTV patterns - capture the day number
+    'ltv': [r'^lifetime_value_d(\d+)$', r'd(\d+).*total.*rev', r'^ltv_d(\d+)$'],
+}
+
+# Columns to explicitly exclude (e.g., roas_ad patterns)
+EXCLUDE_PATTERNS = [r'roas_ad', r'_ad_d\d+']
+
+
+def detect_column_type(col_name):
+    """Detect the type and day number (if applicable) for a column."""
+    col_lower = col_name.lower().strip()
+    
+    # Check exclude patterns first
+    for exclude_pattern in EXCLUDE_PATTERNS:
+        if re.search(exclude_pattern, col_lower, re.IGNORECASE):
+            return None, None
+    
+    for col_type, patterns in COLUMN_PATTERNS.items():
+        for pattern in patterns:
+            match = re.search(pattern, col_lower, re.IGNORECASE)
+            if match:
+                # Extract day number if present
+                day_num = None
+                if match.groups():
+                    try:
+                        day_num = int(match.group(1))
+                    except (ValueError, IndexError):
+                        pass
+                return col_type, day_num
+    
+    return None, None
+
+
+def auto_detect_columns(df):
+    """Auto-detect and map columns from a DataFrame."""
+    column_map = {
+        'date': None,
+        'spend': None,
+        'installs': None,
+        'cpi': None,
+        'roas': {},  # {day: column_name}
+        'retention': {},  # {day: column_name}
+        'ltv': {},  # {day: column_name}
+    }
+    
+    def is_column_valid(col):
+        """Check if column has non-zero values."""
+        try:
+            # Try to clean and convert to numeric
+            col_data = df[col].astype(str).str.replace('%', '').str.replace('$', '').str.replace(',', '')
+            values = pd.to_numeric(col_data, errors='coerce')
+            return values.sum() > 0
+        except:
+            return True  # If can't check, assume valid
+    
+    for col in df.columns:
+        col_type, day_num = detect_column_type(col)
+        
+        if col_type in ['date', 'spend', 'installs', 'cpi']:
+            if column_map[col_type] is None:
+                column_map[col_type] = col
+        elif col_type in ['roas', 'retention', 'ltv'] and day_num is not None:
+            # Filter out columns with all zero values
+            if is_column_valid(col):
+                column_map[col_type][day_num] = col
+    
+    return column_map
+
+
+def load_auto_detect_file(uploaded_file):
+    """Load and parse a file with auto-detected columns (CSV or Excel)."""
+    
+    # Determine file type and read
+    file_name = uploaded_file.name.lower()
+    
+    if file_name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    elif file_name.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(uploaded_file)
+    else:
+        raise ValueError(f"Unsupported file type: {file_name}")
+    
+    # Auto-detect columns
+    column_map = auto_detect_columns(df)
+    
+    # Validate required columns
+    missing = []
+    if column_map['spend'] is None:
+        missing.append('Spend/Cost')
+    if column_map['installs'] is None:
+        missing.append('Installs')
+    if not column_map['roas']:
+        missing.append('ROAS (at least one day)')
+    
+    if missing:
+        raise ValueError(f"Could not detect required columns: {', '.join(missing)}")
+    
+    # Build standardized data
+    result = {
+        'raw_df': df,
+        'column_map': column_map,
+        'detected_columns': {
+            'date': column_map['date'],
+            'spend': column_map['spend'],
+            'installs': column_map['installs'],
+            'roas_days': sorted(column_map['roas'].keys()),
+            'retention_days': sorted(column_map['retention'].keys()) if column_map['retention'] else [],
+            'ltv_days': sorted(column_map['ltv'].keys()) if column_map['ltv'] else [],
+        }
+    }
+    
+    return result
+
+
+def convert_auto_detect_to_analysis_format(auto_data, channel_name='channel'):
+    """Convert auto-detected data to format needed for analysis."""
+    
+    df = auto_data['raw_df'].copy()
+    col_map = auto_data['column_map']
+    
+    # Clean numeric columns - remove $, commas, percentage signs
+    def clean_numeric(val):
+        if pd.isna(val):
+            return np.nan
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            # Remove currency symbols, commas, percentage signs, spaces
+            val = val.replace('$', '').replace(',', '').replace('%', '').replace(' ', '').strip()
+            if val == '' or val == '-':
+                return np.nan
+            try:
+                return float(val)
+            except ValueError:
+                return np.nan
+        return float(val) if val else np.nan
+    
+    # Extract and clean spend/installs
+    spend_col = col_map['spend']
+    installs_col = col_map['installs']
+    
+    df['_spend'] = df[spend_col].apply(clean_numeric)
+    df['_installs'] = df[installs_col].apply(clean_numeric)
+    
+    # Calculate CPI
+    df['_cpi'] = df['_spend'] / df['_installs']
+    df['_cpi'] = df['_cpi'].replace([np.inf, -np.inf], np.nan)
+    
+    # Extract ROAS values
+    roas_data = {}
+    for day, col in col_map['roas'].items():
+        roas_data[day] = df[col].apply(clean_numeric)
+        # Convert percentage to decimal if values > 1
+        if roas_data[day].max() > 10:  # Likely percentage format
+            roas_data[day] = roas_data[day] / 100
+    
+    # Extract retention values if available
+    retention_data = {}
+    for day, col in col_map['retention'].items():
+        retention_data[day] = df[col].apply(clean_numeric)
+        # Convert percentage to decimal if values > 1
+        if retention_data[day].max() > 1:
+            retention_data[day] = retention_data[day] / 100
+    
+    # Always calculate LTV from ROAS: LTV = ROAS * CPI
+    # This ensures consistency as ROAS data typically has more data points
+    ltv_data = {}
+    if roas_data:
+        for day, roas_series in roas_data.items():
+            ltv_data[day] = roas_series * df['_cpi']
+    elif col_map['ltv']:
+        # Fallback to direct LTV columns only if no ROAS available
+        for day, col in col_map['ltv'].items():
+            ltv_data[day] = df[col].apply(clean_numeric)
+    
+    # Filter valid rows (positive installs and spend)
+    valid_mask = (df['_installs'] > 0) & (df['_spend'] > 0)
+    df_valid = df[valid_mask].reset_index(drop=True)
+    
+    if len(df_valid) == 0:
+        raise ValueError("No valid rows found (all rows have zero installs or spend)")
+    
+    # Build output dictionaries matching existing format
+    # CPI dict
+    cpi_df = pd.DataFrame({
+        'day': range(len(df_valid)),
+        'INSTALLS': df_valid['_installs'].values,
+        'CPI': df_valid['_cpi'].values
+    })
+    cpi_dict = {channel_name: cpi_df}
+    
+    # RR dict - use detected retention or create synthetic from typical curve
+    rr_days = [1, 3, 7, 14, 30, 60]
+    if retention_data:
+        # Use detected retention values (average across cohorts)
+        rr_values = []
+        for day in rr_days:
+            if day in retention_data:
+                val = retention_data[day][valid_mask].mean()
+                rr_values.append(val if not pd.isna(val) else 0.5 ** (day / 7))
+            else:
+                # Interpolate/extrapolate
+                rr_values.append(0.5 ** (day / 7))  # Typical decay
+    else:
+        # Use typical retention curve
+        rr_values = [0.35, 0.25, 0.18, 0.12, 0.08, 0.05]
+    
+    rr_df = pd.DataFrame({
+        'RR': [1.0] + rr_values  # Include day 0 = 100%
+    })
+    rr_dict = {channel_name: rr_df}
+    
+    # LTV dict - use calculated LTV values (average across cohorts for each day)
+    ltv_days_sorted = sorted(ltv_data.keys())
+    ltv_values = []
+    for day in ltv_days_sorted:
+        val = ltv_data[day][valid_mask].mean()
+        ltv_values.append(val if not pd.isna(val) else 0)
+    
+    # Ensure we have day 0
+    if 0 not in ltv_days_sorted:
+        ltv_days_sorted = [0] + ltv_days_sorted
+        ltv_values = [ltv_values[0] * 0.3 if ltv_values else 0] + ltv_values  # Estimate D0
+    
+    ltv_df = pd.DataFrame({
+        'LTV': ltv_values
+    })
+    ltv_dict = {channel_name: ltv_df}
+    
+    # Return channel list
+    channel_list = [channel_name]
+    
+    # Build per-cohort data for individual predictions
+    # Each cohort (row) will be predicted separately based on its available ROAS data
+    # Only include cohorts with at least D7 ROAS data for reliable prediction
+    cohorts_data = []
+    roas_days_sorted = sorted(roas_data.keys())
+    
+    for idx in df_valid.index:
+        cohort_roas = {}
+        prev_val = None
+        
+        for day in roas_days_sorted:
+            if day in roas_data:
+                val = roas_data[day].loc[idx]
+                # Only use non-zero ROAS values (already cleaned by roas_data)
+                if pd.notna(val) and val > 0:
+                    # Check if value is same as previous (indicating stale/repeated data)
+                    if prev_val is not None and abs(val - prev_val) < 0.001:
+                        # Value hasn't changed - this cohort hasn't reached this day yet
+                        # Skip this and all subsequent days
+                        break
+                    cohort_roas[day] = float(val)
+                    prev_val = val
+        
+        # Only add cohort if it has at least D7 ROAS data (min requirement for reliable prediction)
+        max_day = max(cohort_roas.keys()) if cohort_roas else 0
+        if max_day >= 7 and len(cohort_roas) >= 2:
+            cohorts_data.append({
+                'date': df_valid.loc[idx, col_map['date']] if col_map['date'] else idx,
+                'spend': float(df_valid.loc[idx, '_spend']),
+                'installs': float(df_valid.loc[idx, '_installs']),
+                'cpi': float(df_valid.loc[idx, '_cpi']),
+                'roas_curve': cohort_roas
+            })
+    
+    # Calculate totals from qualifying cohorts only
+    spend_total = sum(c['spend'] for c in cohorts_data)
+    installs_total = sum(c['installs'] for c in cohorts_data)
+    
+    direct_calc_info = {
+        'spend_total': spend_total,
+        'installs_total': installs_total,
+        'cohorts_data': cohorts_data,
+        'cpi_avg': spend_total / installs_total if installs_total > 0 else 0
+    }
+    
+    return cpi_dict, rr_dict, ltv_dict, channel_list, auto_data['detected_columns'], direct_calc_info
 
 
 def load_data(uploaded_file):
@@ -522,6 +827,189 @@ def safe_dau_total(dau_df):
     return th.DAU_total(dau_df)
 
 
+def fit_power_law_roas(roas_curve, max_days=PROFILE_MAX_DAYS):
+    """
+    Fit power law to ROAS curve and predict for all days.
+    
+    Args:
+        roas_curve: dict {day: roas_value} with non-zero values only
+        max_days: maximum days to predict
+    
+    Returns:
+        numpy array of predicted ROAS values for days 0 to max_days-1
+    """
+    if len(roas_curve) < 2:
+        # Not enough data, return zeros
+        return np.zeros(max_days)
+    
+    # Get data points
+    days = np.array(sorted(roas_curve.keys()))
+    roas_values = np.array([roas_curve[d] for d in days])
+    
+    # Filter D2+ for power law fit (D0 and D1 often have different behavior)
+    # Also filter out day=0 to avoid log(0)
+    mask = (days >= 2) & (roas_values > 0)
+    if mask.sum() < 2:
+        # Not enough data after filtering, use days >= 1 with positive values
+        mask = (days >= 1) & (roas_values > 0)
+    
+    if mask.sum() < 2:
+        # Still not enough, try simple linear extrapolation from available data
+        # Return the last known value extended forward
+        last_day = max(roas_curve.keys())
+        last_val = roas_curve[last_day]
+        predicted_roas = np.zeros(max_days)
+        for d in range(max_days):
+            if d in roas_curve:
+                predicted_roas[d] = roas_curve[d]
+            elif d > last_day:
+                # Simple growth assumption
+                predicted_roas[d] = last_val * (1 + 0.02 * (d - last_day) / 30)
+            else:
+                predicted_roas[d] = roas_curve.get(0, 0.1)
+        return predicted_roas
+    
+    fit_days = days[mask].astype(float)
+    fit_roas = roas_values[mask].astype(float)
+    
+    # Power law fit: ROAS = a * day^b (via log-linear regression)
+    log_days = np.log(fit_days)
+    log_roas = np.log(fit_roas)
+    
+    # Check for invalid values
+    if np.any(~np.isfinite(log_days)) or np.any(~np.isfinite(log_roas)):
+        # Fallback to simple extrapolation
+        last_day = int(fit_days.max())
+        last_val = fit_roas[-1]
+        predicted_roas = np.zeros(max_days)
+        for d in range(max_days):
+            if d in roas_curve:
+                predicted_roas[d] = roas_curve[d]
+            else:
+                predicted_roas[d] = last_val * (d / last_day) ** 0.5 if last_day > 0 else last_val
+        return predicted_roas
+    
+    n = len(log_days)
+    sum_x = log_days.sum()
+    sum_y = log_roas.sum()
+    sum_xy = (log_days * log_roas).sum()
+    sum_x2 = (log_days ** 2).sum()
+    
+    denominator = n * sum_x2 - sum_x ** 2
+    if abs(denominator) > 1e-10:
+        b = (n * sum_xy - sum_x * sum_y) / denominator
+        ln_a = (sum_y * sum_x2 - sum_x * sum_xy) / denominator
+        a = np.exp(ln_a)
+    else:
+        a = fit_roas.mean()
+        b = 0.5
+    
+    # Sanity check on coefficients
+    if not np.isfinite(a) or not np.isfinite(b) or a <= 0:
+        a = fit_roas.mean() if fit_roas.mean() > 0 else 0.1
+        b = 0.5
+    
+    # Generate predicted ROAS for all days
+    last_observed_day = int(fit_days.max())
+    predicted_roas = np.zeros(max_days)
+    
+    # D0 - use actual or estimate
+    predicted_roas[0] = roas_curve.get(0, a * 0.5 if a > 0 else 0.1)
+    
+    for d in range(1, max_days):
+        if d in roas_curve and roas_curve[d] > 0:
+            # Use actual data
+            predicted_roas[d] = roas_curve[d]
+        else:
+            # Use power law prediction
+            raw_pred = a * (d ** b)
+            
+            # Apply uncertainty discount for extrapolation beyond observed data
+            days_beyond = max(d - last_observed_day, 0)
+            if days_beyond > 0:
+                discount = 0.02 + ((days_beyond / 300) ** 0.65) * 0.28
+                raw_pred = raw_pred * (1 - discount)
+            
+            predicted_roas[d] = raw_pred
+    
+    return predicted_roas
+
+
+def build_direct_roas_revenue(direct_calc_info, channel_name='channel'):
+    """Build revenue tables from per-cohort ROAS predictions.
+    
+    Each cohort is predicted individually based on its available ROAS data,
+    then all cohorts are summed for the final result.
+    """
+    cohorts_data = direct_calc_info.get('cohorts_data', [])
+    spend_total = direct_calc_info['spend_total']
+    installs_total = direct_calc_info['installs_total']
+    
+    all_days = np.arange(0, PROFILE_MAX_DAYS)
+    
+    # Accumulate daily revenue from all cohorts
+    total_daily_revenue = np.zeros(PROFILE_MAX_DAYS)
+    total_cumulative_roas = np.zeros(PROFILE_MAX_DAYS)
+    
+    # Store per-cohort summary for combo chart
+    cohort_summary = []
+    
+    for cohort in cohorts_data:
+        cohort_spend = cohort['spend']
+        cohort_roas_curve = cohort['roas_curve']
+        cohort_date = cohort.get('date', '')
+        
+        # Fit power law and predict ROAS for this cohort
+        predicted_roas = fit_power_law_roas(cohort_roas_curve, PROFILE_MAX_DAYS)
+        
+        # Calculate cumulative revenue for this cohort
+        cumulative_revenue = cohort_spend * predicted_roas
+        
+        # Convert to daily revenue
+        daily_revenue = np.diff(cumulative_revenue, prepend=0)
+        
+        # Add to totals
+        total_daily_revenue += daily_revenue
+        total_cumulative_roas += predicted_roas * cohort_spend
+        
+        # Store cohort summary (for combo chart)
+        cohort_summary.append({
+            'date': cohort_date,
+            'spend': cohort_spend,
+            'installs': cohort.get('installs', 0),
+            'pROAS_D180': predicted_roas[180] if len(predicted_roas) > 180 else 0,
+            'pROAS_D360': predicted_roas[360] if len(predicted_roas) > 360 else predicted_roas[-1]
+        })
+    
+    # Normalize cumulative ROAS by total spend
+    if spend_total > 0:
+        avg_roas_curve = total_cumulative_roas / spend_total
+    else:
+        avg_roas_curve = np.zeros(PROFILE_MAX_DAYS)
+    
+    # Build ltv_tables format (for compatibility with existing code)
+    revenue_df = pd.DataFrame([total_daily_revenue], columns=[str(d) for d in all_days])
+    revenue_df.index = pd.Index([channel_name], name='cohort_date')
+    
+    # For DAU tables, create simple representation (total installs on D0)
+    dau_df = pd.DataFrame([[installs_total] + [0] * (PROFILE_MAX_DAYS - 1)], 
+                          columns=[str(d) for d in all_days])
+    dau_df.index = pd.Index([channel_name], name='cohort_date')
+    
+    ltv_tables = {channel_name: revenue_df}
+    dau_tables = {channel_name: dau_df}
+    
+    # Create variables dict for compatibility
+    variables = {
+        f"{channel_name}_cost": spend_total,
+        f"{channel_name}_roas_curve": avg_roas_curve,
+        f"{channel_name}_cohorts_count": len(cohorts_data),
+        f"{channel_name}_cohort_summary": cohort_summary
+    }
+    
+    return ltv_tables, dau_tables, variables
+
+
 def format_number(num):
     """Smart number formatting - reduce noise."""
     if abs(num) >= 1_000_000:
@@ -549,6 +1037,7 @@ def create_dau_chart(dau_tables, channel_list):
         fig = go.Figure()
         colors = [COLORS['primary'], COLORS['accent'], COLORS['success'], COLORS['warning']]
         for i, col in enumerate(combined_DAU_t.columns):
+            color = colors[i % len(colors)]
             fig.add_trace(go.Scatter(
                 x=pd.to_numeric(combined_DAU_t.index), 
                 y=combined_DAU_t[col],
@@ -556,7 +1045,7 @@ def create_dau_chart(dau_tables, channel_list):
                 fill='tonexty' if i > 0 else 'tozeroy',
                 mode='lines',
                 line=dict(width=0),
-                fillcolor=colors[i % len(colors)].replace(')', ', 0.6)').replace('rgb', 'rgba').replace('#', 'rgba(') if '#' in colors[i % len(colors)] else colors[i % len(colors)],
+                fillcolor=hex_to_rgba(color, 0.6),
                 hovertemplate=f'{col}<br>Day %{{x}}<br>DAU: %{{y:,.0f}}<extra></extra>'
             ))
         
@@ -679,6 +1168,100 @@ def create_revenue_chart(ltv_tables, channel_list):
     return fig, combined_revenue
 
 
+def create_cohort_combo_chart(variables, channel_list):
+    """Create combo chart: Spend bars + pROAS D180/D360 lines per cohort date."""
+    from plotly.subplots import make_subplots
+    
+    # Get cohort summary from variables
+    cohort_summary = None
+    for channel in channel_list:
+        key = f"{channel}_cohort_summary"
+        if key in variables:
+            cohort_summary = variables[key]
+            break
+    
+    if not cohort_summary or len(cohort_summary) == 0:
+        # Fallback: no cohort data available
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Cohort data not available for this file format",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(size=14, color=COLORS['muted'])
+        )
+        fig.update_layout(**SWD_TEMPLATE['layout'], height=450)
+        return fig
+    
+    # Create DataFrame from cohort summary
+    df = pd.DataFrame(cohort_summary)
+    df = df.sort_values('date').reset_index(drop=True)
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Bar chart for Spend
+    fig.add_trace(
+        go.Bar(
+            x=df['date'],
+            y=df['spend'],
+            name='Spend',
+            marker_color=hex_to_rgba(COLORS['muted'], 0.7),
+            hovertemplate='%{x}<br>Spend: $%{y:,.0f}<extra></extra>'
+        ),
+        secondary_y=False
+    )
+    
+    # Line chart for pROAS D180
+    fig.add_trace(
+        go.Scatter(
+            x=df['date'],
+            y=df['pROAS_D180'],
+            name='pROAS D180',
+            mode='lines+markers',
+            line=dict(color=COLORS['primary'], width=3),
+            marker=dict(size=6),
+            hovertemplate='%{x}<br>pROAS D180: %{y:.1%}<extra></extra>'
+        ),
+        secondary_y=True
+    )
+    
+    # Line chart for pROAS D360
+    fig.add_trace(
+        go.Scatter(
+            x=df['date'],
+            y=df['pROAS_D360'],
+            name='pROAS D360',
+            mode='lines+markers',
+            line=dict(color=COLORS['success'], width=3),
+            marker=dict(size=6),
+            hovertemplate='%{x}<br>pROAS D360: %{y:.1%}<extra></extra>'
+        ),
+        secondary_y=True
+    )
+    
+    # Update layout
+    fig.update_layout(
+        **SWD_TEMPLATE['layout'],
+        title=dict(text='Spend & Predicted ROAS by Cohort', font=dict(size=16, color='#1e293b')),
+        height=500,
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
+        ),
+        barmode='group'
+    )
+    
+    # Update axes - remove gridlines
+    fig.update_xaxes(title_text='Cohort Date', tickangle=-45, showgrid=False)
+    fig.update_yaxes(title_text='Spend ($)', secondary_y=False, showgrid=False)
+    fig.update_yaxes(title_text='pROAS', tickformat='.0%', secondary_y=True, showgrid=False)
+    
+    return fig
+
+
 def create_profit_chart(ltv_tables, variables, channel_list):
     """Create profit/loss visualization."""
     total_revenue = sum(ltv.sum().sum() for ltv in ltv_tables.values())
@@ -796,8 +1379,7 @@ def create_profit_chart(ltv_tables, variables, channel_list):
             linecolor='#E2E8F0',
         ),
         yaxis=dict(
-            showgrid=True,
-            gridcolor='#EDF2F7',
+            showgrid=False,
             zeroline=False
         )
     )
@@ -830,54 +1412,117 @@ def main():
     
     # Sidebar
     st.sidebar.header("📁 Data Upload")
-    st.sidebar.markdown("""
-    Upload an Excel file with sheets for each channel containing:
-    - **Columns A-C**: day, INSTALLS, CPI
-    - **Column F**: RR (Retention Rate) values
-    - **Column G**: LTV values
-    """)
     
-    # Template download button
-    import os
-    template_path = os.path.join(os.path.dirname(__file__), 'input_template.xlsx')
-    if os.path.exists(template_path):
-        with open(template_path, 'rb') as f:
-            template_data = f.read()
-        st.sidebar.download_button(
-            label="📥 Download Input Template",
-            data=template_data,
-            file_name="input_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Download the template Excel file to fill in your data"
-        )
-    
-    uploaded_file = st.sidebar.file_uploader(
-        "Choose Excel file", 
-        type=['xlsx', 'xls'],
-        help="Upload your input template Excel file"
+    # File format selection
+    upload_mode = st.sidebar.radio(
+        "Select input format:",
+        ["📊 Auto-Detect (CSV/Excel)", "📋 Template Format"],
+        help="Auto-detect works with most export formats from ad platforms"
     )
     
-    if uploaded_file is None:
-        st.info("👈 Please upload an Excel file to begin the analysis.")
+    if upload_mode == "📋 Template Format":
+        st.sidebar.markdown("""
+        Upload Excel with specific columns:
+        - **Columns A-C**: day, INSTALLS, CPI
+        - **Column F**: RR values
+        - **Column G**: LTV values
+        """)
         
-        # Show sample format
-        with st.expander("📋 Expected File Format"):
-            st.markdown("""
-            Your Excel file should have:
-            - One sheet per channel (e.g., 'applovin', 'googleads')
-            - Each sheet contains:
-              - **Column A (day)**: Day numbers
-              - **Column B (INSTALLS)**: Number of installs per day
-              - **Column C (CPI)**: Cost per install
-              - **Column F (RR)**: Retention rates at days 1, 3, 7, 14, 30, 60
-              - **Column G (LTV)**: LTV values at days 0, 1, 3, 7, 14, 30, 60
-            """)
+        # Template download button
+        import os
+        template_path = os.path.join(os.path.dirname(__file__), 'input_template.xlsx')
+        if os.path.exists(template_path):
+            with open(template_path, 'rb') as f:
+                template_data = f.read()
+            st.sidebar.download_button(
+                label="📥 Download Input Template",
+                data=template_data,
+                file_name="input_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download the template Excel file to fill in your data"
+            )
+        
+        uploaded_file = st.sidebar.file_uploader(
+            "Choose Excel file", 
+            type=['xlsx', 'xls'],
+            help="Upload your input template Excel file",
+            key="template_upload"
+        )
+        use_auto_detect = False
+    else:
+        st.sidebar.markdown("""
+        Upload any CSV/Excel with columns for:
+        - **Spend** (cost, network_cost, ad_spend)
+        - **Installs** (installs, install_count)
+        - **ROAS at various days** (D1, D7, D14, etc.)
+        """)
+        
+        uploaded_file = st.sidebar.file_uploader(
+            "Choose CSV or Excel file", 
+            type=['csv', 'xlsx', 'xls'],
+            help="Columns will be auto-detected",
+            key="auto_upload"
+        )
+        use_auto_detect = True
+    
+    if uploaded_file is None:
+        st.info("👈 Please upload a file to begin the analysis.")
+        
+        # Show supported formats
+        with st.expander("📋 Supported File Formats"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                **Auto-Detect Mode** supports:
+                - AppLovin exports
+                - Adjust exports  
+                - Any CSV/Excel with:
+                  - Spend/Cost column
+                  - Installs column
+                  - ROAS columns (D1, D7, D14, etc.)
+                """)
+            
+            with col2:
+                st.markdown("""
+                **Template Mode** requires:
+                - Specific column layout
+                - Column A: day
+                - Column B: INSTALLS
+                - Column C: CPI
+                - Column F: RR
+                - Column G: LTV
+                """)
         return
     
     # Process the uploaded file
     try:
-        with st.spinner("Loading data..."):
-            cpi_dict, rr_dict, ltv_dict, channel_list = load_data(uploaded_file)
+        if use_auto_detect:
+            # Auto-detect mode
+            with st.spinner("Auto-detecting columns..."):
+                auto_data = load_auto_detect_file(uploaded_file)
+                detected = auto_data['detected_columns']
+                
+                # Show detected columns
+                with st.sidebar.expander("🔍 Detected Columns", expanded=True):
+                    st.write(f"**Spend:** {detected['spend']}")
+                    st.write(f"**Installs:** {detected['installs']}")
+                    st.write(f"**ROAS days:** {detected['roas_days']}")
+                    if detected['retention_days']:
+                        st.write(f"**Retention days:** {detected['retention_days']}")
+                    if detected['ltv_days']:
+                        st.write(f"**LTV days:** {detected['ltv_days']}")
+                
+                # Convert to analysis format
+                cpi_dict, rr_dict, ltv_dict, channel_list, _, direct_calc_info = convert_auto_detect_to_analysis_format(
+                    auto_data, 
+                    channel_name=uploaded_file.name.split('.')[0]
+                )
+        else:
+            # Template mode
+            direct_calc_info = None  # Not used in template mode
+            with st.spinner("Loading data..."):
+                cpi_dict, rr_dict, ltv_dict, channel_list = load_data(uploaded_file)
         
         # Show data preview for debugging
         with st.sidebar.expander("🔍 Data Preview"):
@@ -917,11 +1562,19 @@ def main():
         st.sidebar.success(f"✅ Loaded {len(channel_list)} channel(s)")
         st.sidebar.markdown(f"**Channels:** {', '.join(channel_list)}")
         
-        with st.spinner("Processing channels..."):
-            variables = process_channels(cpi_dict, rr_dict, ltv_dict, channel_list)
-        
-        with st.spinner("Building revenue tables..."):
-            ltv_tables, dau_tables = build_revenue_tables(variables, cpi_dict, channel_list)
+        # Use direct ROAS calculation for auto-detect mode (more accurate for ROAS data)
+        if use_auto_detect and direct_calc_info:
+            with st.spinner("Building revenue from ROAS curve..."):
+                ltv_tables, dau_tables, variables = build_direct_roas_revenue(
+                    direct_calc_info, 
+                    channel_name=channel_list[0]
+                )
+        else:
+            with st.spinner("Processing channels..."):
+                variables = process_channels(cpi_dict, rr_dict, ltv_dict, channel_list)
+            
+            with st.spinner("Building revenue tables..."):
+                ltv_tables, dau_tables = build_revenue_tables(variables, cpi_dict, channel_list)
         
         # Create tabs for different views (ROAS & Profit first)
         tab1, tab2, tab3, tab4 = st.tabs([
@@ -1009,18 +1662,53 @@ def main():
         
         # Tab 3: Revenue Analysis
         with tab3:
-            st.header("Daily Revenue")
-            fig_rev, combined_revenue = create_revenue_chart(ltv_tables, channel_list)
-            st.plotly_chart(fig_rev, use_container_width=True)
+            # Check if cohort summary is available (auto-detect mode)
+            has_cohort_data = any(f"{ch}_cohort_summary" in variables for ch in channel_list)
             
-            # Download button
-            excel_data = to_excel_download(combined_revenue, 'Revenue')
-            st.download_button(
-                label="📥 Download Revenue Data",
-                data=excel_data,
-                file_name="Revenue_analysis.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            if has_cohort_data:
+                st.header("Cohort Performance")
+                fig_combo = create_cohort_combo_chart(variables, channel_list)
+                st.plotly_chart(fig_combo, use_container_width=True)
+                
+                # Show cohort summary table
+                for channel in channel_list:
+                    key = f"{channel}_cohort_summary"
+                    if key in variables:
+                        cohort_df = pd.DataFrame(variables[key])
+                        cohort_df = cohort_df.sort_values('date').reset_index(drop=True)
+                        
+                        # Format for display
+                        display_df = cohort_df.copy()
+                        display_df['spend'] = display_df['spend'].apply(lambda x: f"${x:,.0f}")
+                        display_df['pROAS_D180'] = display_df['pROAS_D180'].apply(lambda x: f"{x:.1%}")
+                        display_df['pROAS_D360'] = display_df['pROAS_D360'].apply(lambda x: f"{x:.1%}")
+                        display_df.columns = ['Date', 'Spend', 'Installs', 'pROAS D180', 'pROAS D360']
+                        
+                        with st.expander("📋 Cohort Details Table", expanded=False):
+                            st.dataframe(display_df, use_container_width=True, height=400)
+                        
+                        # Download button
+                        excel_data = to_excel_download(cohort_df, 'Cohort_Summary')
+                        st.download_button(
+                            label="📥 Download Cohort Data",
+                            data=excel_data,
+                            file_name="Cohort_analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        break
+            else:
+                st.header("Daily Revenue")
+                fig_rev, combined_revenue = create_revenue_chart(ltv_tables, channel_list)
+                st.plotly_chart(fig_rev, use_container_width=True)
+                
+                # Download button
+                excel_data = to_excel_download(combined_revenue, 'Revenue')
+                st.download_button(
+                    label="📥 Download Revenue Data",
+                    data=excel_data,
+                    file_name="Revenue_analysis.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
         
         # Tab 4: Channel Details
         with tab4:
